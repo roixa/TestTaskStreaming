@@ -43,112 +43,46 @@ public class StreamService extends Service {
     public static final String ACTION_PAUSE="com.roix.testtaskstream.pause";
     public static final String ACTION_STOP="com.roix.testtaskstream.stop";
     public static final String ACTION_MUTE="com.roix.testtaskstream.mute";
-    public enum State{
-        STATE1,
-        STATE2
-    }
 
 
-    private MediaPlayer mediaPlayer;
-
-    private ExoPlayer exoPlayer;
-    private PlayerControl playerControl;
-    private ExtractorSampleSource extractorSampleSource;
-    MediaCodecAudioTrackRenderer audioTrackRenderer;
     private boolean isBound=false;
-    private boolean cachingStarted=false;
+    StreamingMediaPlayer streamingMediaPlayer;
 
 
-
-
-    private final long maxCacheDurationMSEK=15000;
-    private int RENDERER_COUNT = 1; //since you want to render simple audio
-    private int minBufferMs = 0;
-    private int minRebufferMs = 0;
-    private int BUFFER_SEGMENT_SIZE =  1024;
-    private int BUFFER_SEGMENT_COUNT = 10;
-
-    private long startingCachingTime=0;
-    private long latency=0;
     private String lastUrl;
-    private StreamCallback callback;
     private MyBinder binder;
 
     public StreamService() {
         binder = new MyBinder();
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true){
-                    if(callback==null) continue;
-
-                    callback.onLoad(latency);
-                    try {
-                        Thread.sleep(300);
-                        if(exoPlayer!=null&&!exoPlayer.getPlayWhenReady()&&cachingStarted) latency+=300;
-                        long estimatedBufferDuration = ExoPlayer.UNKNOWN_TIME;
-                        long estimatedBufferPosition = exoPlayer.getBufferedPosition();
-                        if (estimatedBufferPosition != ExoPlayer.UNKNOWN_TIME) {
-                            estimatedBufferDuration = estimatedBufferPosition - exoPlayer.getCurrentPosition();
-                        }
-
-                        if(extractorSampleSource!=null&&audioTrackRenderer!=null) {
-                            Log.i("play task", estimatedBufferDuration+" estimatedBufferDuration"
-
-                            );
-
-                        }
-
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-        }).start();
 
     }
 
-    public void initService(final StreamCallback callback){
-        this.callback=callback;
+    public void initService(String url){
         setNotificationBar();
         initBroadcastReciever();
-
+        if(streamingMediaPlayer!=null&&streamingMediaPlayer.getState()!= StreamingMediaPlayer.State.Stopped)return;
+        lastUrl=url;
+        streamingMediaPlayer=new StreamingMediaPlayer();
+        streamingMediaPlayer.startStreaming(url);
 
     }
 
-
-
-    public void initPlayer(String url){
-        lastUrl=url;
-        exoPlayer=ExoPlayer.Factory.newInstance(RENDERER_COUNT,minBufferMs,minRebufferMs);
-
-        DefaultUriDataSource dataSource = new DefaultUriDataSource(getApplicationContext(),
-                Util.getUserAgent(getApplicationContext(), StreamService.class.getSimpleName()));
-        Allocator allocator = new DefaultAllocator(BUFFER_SEGMENT_SIZE);
-
-        //ExtractorSampleSource – For formats such as MP3, M4A, MP4, WebM, MPEG-TS and AAC.
-        extractorSampleSource = new ExtractorSampleSource(Uri.parse(url),
-                dataSource, allocator, BUFFER_SEGMENT_COUNT * BUFFER_SEGMENT_SIZE);
-        audioTrackRenderer=new MediaCodecAudioTrackRenderer(extractorSampleSource, MediaCodecSelector.DEFAULT);
-        exoPlayer.prepare(audioTrackRenderer);
-        //exoPlayer.setPlayWhenReady(true);
-        exoPlayer.seekTo(exoPlayer.getCurrentPosition());
-        playerControl=new PlayerControl(exoPlayer);
-        StreamingMediaPlayer streamingMediaPlayer=new StreamingMediaPlayer(url);
+    public void setCallback(StreamCallback callback){
+        if(streamingMediaPlayer!=null)streamingMediaPlayer.setCallback(callback);
     }
 
 
     @Override
     public IBinder onBind(Intent intent) {
         isBound=true;
-
         return binder;
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
         isBound=false;
-        callback=null;
+        streamingMediaPlayer.setCallback(null);
+
         return super.onUnbind(intent);
     }
 
@@ -206,50 +140,20 @@ public class StreamService extends Service {
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
             if(action.equals(ACTION_PLAY)){
-                if(exoPlayer==null) initPlayer(lastUrl);
-                else {
-                    long startsTime=System.currentTimeMillis()-startingCachingTime;
-                    startingCachingTime=0;
-                    //extractorSampleSource.prepare(audioTrackRenderer.getPositionUs());
-
-                    //extractorSampleSource.seekToUs(audioTrackRenderer.getPositionUs());
-                    long estimatedBufferDuration = ExoPlayer.UNKNOWN_TIME;
-                    long estimatedBufferPosition = exoPlayer.getBufferedPosition();
-                    if (estimatedBufferPosition != ExoPlayer.UNKNOWN_TIME) {
-                        estimatedBufferDuration = estimatedBufferPosition - exoPlayer.getCurrentPosition();
-                    }
-                    //exoPlayer.seekTo(exoPlayer.getCurrentPosition()-estimatedBufferDuration);
-                    if(startsTime>maxCacheDurationMSEK){
-                        //exoPlayer.seekTo(maxCacheDurationMSEK);
-                    }
-                    if(cachingStarted&&exoPlayer.getPlayWhenReady()){
-                        exoPlayer.seekTo(0);
-                        latency=0;
-                        cachingStarted=false;
-                        playerControl.start();
-                    }
-                    exoPlayer.setPlayWhenReady(true);
-                }
+                if(streamingMediaPlayer.getState()==StreamingMediaPlayer.State.Playing) streamingMediaPlayer.moveToLiveEdge();
+                streamingMediaPlayer.start();
             }
             else if(action.equals(ACTION_PAUSE)){
-                if(exoPlayer==null)return;
-                cachingStarted=true;
-                exoPlayer.setPlayWhenReady(false);
-                startingCachingTime = System.currentTimeMillis();
+                streamingMediaPlayer.pause();
             }
             else if(action.equals(ACTION_STOP)){
-                if(exoPlayer==null)return;
-                exoPlayer.release();
-                exoPlayer=null;
-                latency=0;
-                cachingStarted=false;
+                streamingMediaPlayer.stop();
 
             }
             else  if(action.equals(ACTION_MUTE)){
-                if(exoPlayer==null)return;
+                streamingMediaPlayer.mute();
 
             }
-            MediaExtractor mediaExtractor=new MediaExtractor();
 
         }
     }

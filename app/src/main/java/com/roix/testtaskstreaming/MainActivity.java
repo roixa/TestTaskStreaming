@@ -113,8 +113,8 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
             public void onServiceConnected(ComponentName name, IBinder binder) {
                 Log.i("play task","onServiceConnected");
                 streamService = ((StreamService.MyBinder) binder).getService();
-                streamService.initService(streamCallback);
-                streamService.initPlayer(url2);
+                streamService.initService(url2);
+                streamService.setCallback(streamCallback);
             }
             public void onServiceDisconnected(ComponentName name) {
 

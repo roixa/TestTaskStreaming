@@ -14,6 +14,7 @@ import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Handler;
 import android.util.Log;
+import android.util.Pair;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -36,42 +37,89 @@ public class StreamingMediaPlayer {
     private AudioTrack audioTrack;
     private ByteBuffer[] codecInputBuffers;
     private ByteBuffer[] codecOutputBuffers;
-    private ArrayList<byte []> resultBuffer;
+    private ArrayList<Pair<byte[],Integer>> resultBuffer;
     private String url;
-    private int playPosition=0;
+    private int maxBufferDurationMSEC=15000;
+    private StreamCallback callback;
 
+
+    private final Object lock=new Object();
+    private long lastTimePosition;
     public enum State {
-        Retrieving, // retrieving music (filling buffer)
-        Stopped,    // player is stopped and not prepared to play
+        Stopped, // player is stopped and not prepared to play
         Playing,    // playback active
+        Paused //
     };
 
     /**
      * Current player state
      */
-    State mState = State.Retrieving;
+    private volatile State state;
+    private boolean isMuted=false;
 
-    public StreamingMediaPlayer(final String url){
-       this.url=url;
-        resultBuffer=new ArrayList<>();
+    public StreamingMediaPlayer(){
+        state=State.Stopped;
+        lastTimePosition=System.currentTimeMillis();
+
+    }
+
+    public void startStreaming(String url){
+        this.url=url;
         try {
             initAndSetFormat();
         } catch (IOException e) {
             e.printStackTrace();
         }
+        state=State.Playing;
         loadAndDecodeTask();
+        playTask();
+    }
 
-        //playTask();
+    public void moveToLiveEdge(){
+        if(state==State.Stopped)startStreaming(url);
+        synchronized (lock){
+            if(resultBuffer.size()==0)return;
+            Pair<byte[],Integer> pair=resultBuffer.get(resultBuffer.size()-1);
+            resultBuffer.clear();
+            resultBuffer.add(pair);
+        }
 
     }
 
-    public void initAndSetFormat() throws IOException {
+    public void start(){
+        if(state==State.Stopped)startStreaming(url);
+        state=State.Playing;
+
+    }
+
+    public void pause(){
+        if(state==State.Stopped) return;
+        state=State.Paused;
+    }
+
+    public void stop(){
+        state=State.Stopped;
+
+    }
+
+    public void mute(){
+        float gain=isMuted?1:0;
+        audioTrack.setStereoVolume(gain,gain);
+        isMuted=!isMuted;
+    }
+
+    public State getState(){return state;}
+
+    public void setCallback(StreamCallback callback){
+        this.callback=callback;
+    }
+
+
+
+    private void initAndSetFormat() throws IOException {
+        resultBuffer=new ArrayList<>();
         extractor = new MediaExtractor();
-        try {
-            extractor.setDataSource(url);
-        } catch (Exception e) {
-            return;
-        }
+        extractor.setDataSource(url);
         MediaFormat format = extractor.getTrackFormat(0);
         String mime = format.getString(MediaFormat.KEY_MIME);
         // the actual decoder
@@ -106,13 +154,14 @@ public class StreamingMediaPlayer {
             public void run() {
                 MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-                while(true ){
-                    int inputBufIndex = codec.dequeueInputBuffer(20000);
+                while(state!=State.Stopped ){
+                    int inputBufIndex = codec.dequeueInputBuffer(10000);
                     if (inputBufIndex >= 0) {
                         ByteBuffer dstBuf = codecInputBuffers[inputBufIndex];
                         int sampleSize =
                                     extractor.readSampleData(dstBuf, 0 /* offset */);
                         long presentationTimeUs = extractor.getSampleTime();
+
                         codec.queueInputBuffer(
                                 inputBufIndex,
                                 0 /* offset */,
@@ -123,7 +172,7 @@ public class StreamingMediaPlayer {
                     }
 
 
-                    int res = codec.dequeueOutputBuffer(info, 20000);
+                    int res = codec.dequeueOutputBuffer(info, 10000);
 
                     if (res >= 0) {
                         //Log.d(LOG_TAG, "got frame, size " + info.size + "/" + info.presentationTimeUs);
@@ -135,10 +184,19 @@ public class StreamingMediaPlayer {
                         buf.get(chunk);
                         buf.clear();
                         if(chunk.length > 0) {
-                            Log.i("StreamingMediaPlayer", " inputBufIndex " + inputBufIndex + " outputBufIndex " + outputBufIndex+" resultBuffer.size "+resultBuffer.size());
+                            Log.i("StreamingMediaPlayer", " inputBufIndex " + inputBufIndex +
+                                    " outputBufIndex " + outputBufIndex+
+                                    " resultBuffer.size "+resultBuffer.size());
 
                             //audioTrack.write(chunk,0,chunk.length);
-                            resultBuffer.add(chunk);
+                            synchronized (lock) {
+                                long chunkDuration=System.currentTimeMillis()-lastTimePosition;
+                                lastTimePosition=System.currentTimeMillis();
+                                resultBuffer.add(new Pair<>(chunk,new Integer((int)chunkDuration)));
+                                int buffDuration=bufferDuration();
+                                if(buffDuration>maxBufferDurationMSEC) resultBuffer.remove(0);
+                                if(callback!=null)callback.onLoad(buffDuration);
+                            }
                             /*
                             if(playPosition<resultBuffer.size()&&resultBuffer.size()>10){
                                 byte[] b=resultBuffer.get(playPosition);
@@ -158,6 +216,7 @@ public class StreamingMediaPlayer {
                     }
 
                 }
+                releaseStreamingResources();
             }
         }).start();
 
@@ -167,15 +226,59 @@ public class StreamingMediaPlayer {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                while (true){
-                    if((audioTrack.getState()==AudioTrack.STATE_INITIALIZED)&&resultBuffer.size()>5){
-                        byte[] b=resultBuffer.get(playPosition);
-                        audioTrack.write(b,0,b.length);
-                        playPosition++;
+                while (state!=State.Stopped){
+                    synchronized (lock) {
+
+                        if (state==State.Playing&&(audioTrack.getState() == AudioTrack.STATE_INITIALIZED) &&resultBuffer.size()>0) {
+
+                            byte[] b = resultBuffer.get(0).first;
+                            audioTrack.write(b, 0, b.length);
+                            resultBuffer.remove(0);
+                            lastTimePosition=System.currentTimeMillis();
+                            if(callback!=null)callback.onLoad(bufferDuration());
+                        }
                     }
                 }
+                //releaseStreamingResources();
             }
         }).start();
+    }
+
+    private int bufferDuration(){
+        int ret=0;
+        for(Pair<byte[],Integer> pair:resultBuffer){
+            ret+=pair.second;
+        }
+        return ret;
+    }
+
+    private void releaseStreamingResources(){
+        if(callback!=null)callback.onLoad(0);
+
+            if(codec != null)
+        {
+            codec.stop();
+            codec.release();
+            codec = null;
+        }
+        if(audioTrack != null)
+        {
+            audioTrack.flush();
+            audioTrack.release();
+            audioTrack = null;
+        }
+        if(extractor!=null) {
+            extractor.release();
+            extractor=null;
+        }
+        codecInputBuffers=null;
+        codecOutputBuffers=null;
+        synchronized (lock){
+            resultBuffer.clear();
+            resultBuffer=null;
+        }
+
+
     }
 
 
