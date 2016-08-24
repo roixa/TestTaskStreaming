@@ -1,6 +1,17 @@
 package com.roix.testtaskstreaming;
 
+import android.annotation.TargetApi;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCrypto;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaPlayer;
+import android.os.Build;
 import android.os.Handler;
 import android.util.Log;
 
@@ -11,216 +22,161 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.ArrayList;
 
 /**
  * Created by u5 on 8/23/16.
  */
 public class StreamingMediaPlayer {
-    long mediaLengthInKb;
-    long mediaLengthInSeconds;
-    File downloadingMediaFile;
-    long totalKbRead;
-    long INTIAL_KB_BUFFER;
-    MediaPlayer mediaPlayer;
-    Handler handle;
-    File bufferedFile;
-    String cachedir;
-    public StreamingMediaPlayer(String cachedir){
-        this.cachedir=cachedir;
-        handle=new Handler();
-    }
 
-    public void startStreaming(final String mediaUrl, long mediaLengthInKb, long mediaLengthInSeconds) throws IOException {
+    private MediaExtractor extractor;
+    private MediaCodec codec;
+    private AudioTrack audioTrack;
+    private ByteBuffer[] codecInputBuffers;
+    private ByteBuffer[] codecOutputBuffers;
+    private ArrayList<byte []> resultBuffer;
+    private String url;
+    private int playPosition=0;
 
-        this.mediaLengthInKb = mediaLengthInKb;
-        this.mediaLengthInSeconds = mediaLengthInSeconds;
+    public enum State {
+        Retrieving, // retrieving music (filling buffer)
+        Stopped,    // player is stopped and not prepared to play
+        Playing,    // playback active
+    };
 
-        Runnable r = new Runnable() {
+    /**
+     * Current player state
+     */
+    State mState = State.Retrieving;
 
-            public void run() {
-
-                try {
-
-                    downloadAudioIncrement(mediaUrl);
-
-                } catch (IOException e) {
-
-                    Log.e(getClass().getName(),"Initialization error for fileUrl=" + mediaUrl);
-                    return;
-
-                }
-
-            }
-
-        };
-        new Thread(r).start();
-
-    }
-
-    public void downloadAudioIncrement(String mediaUrl) throws IOException {
-
-// First establish connection to the media provider
-        Log.i(getClass().getName(), "downloadAudioIncrement:" + mediaUrl);
-
-        URLConnection cn = new URL(mediaUrl).openConnection();
-        cn.connect();
-        InputStream stream = cn.getInputStream();
-        if (stream == null) {
-
-            Log.e(getClass().getName(), "Unable to create InputStream for mediaUrl:" + mediaUrl);
-
+    public StreamingMediaPlayer(final String url){
+       this.url=url;
+        resultBuffer=new ArrayList<>();
+        try {
+            initAndSetFormat();
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-        Log.i(getClass().getName(), "InputStream:" + mediaUrl);
+        loadAndDecodeTask();
 
-// Create the temporary file for buffering data into
-        downloadingMediaFile = File.createTempFile("downloadingMedia", ".dat");
-        FileOutputStream out = new FileOutputStream(downloadingMediaFile);
-        Log.i(getClass().getName(), "FileOutputStream:" );
-
-// Start reading data from the URL stream
-        byte buf[] = new byte[16384];
-        int totalBytesRead = 0, incrementalBytesRead = 0;
-        do {
-
-            int numread = stream.read(buf);
-            Log.i(getClass().getName(), "while:" + numread);
-
-            if (numread <= 0) {
-
-// Nothing left to read so quit
-                break;
-
-            } else {
-
-                out.write(buf, 0, numread);
-                totalBytesRead += numread;
-                incrementalBytesRead += numread;
-                totalKbRead = totalBytesRead/1000;
-
-// Test whether we need to transfer buffered data to the MediaPlayer
-                testMediaBuffer();
-
-            }
-
-        } while (true);
-
-// Lastly transfer fully loaded audio to the MediaPlayer and close the InputStream
-        stream.close();
+        //playTask();
 
     }
 
-    private void testMediaBuffer() {
+    public void initAndSetFormat() throws IOException {
+        extractor = new MediaExtractor();
+        try {
+            extractor.setDataSource(url);
+        } catch (Exception e) {
+            return;
+        }
+        MediaFormat format = extractor.getTrackFormat(0);
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        // the actual decoder
+        codec = MediaCodec.createDecoderByType(mime);
+        codec.configure(format, null /* surface */, null /* crypto */, 0 /* flags */);
+        codec.start();
+        codecInputBuffers = codec.getInputBuffers();
+        codecOutputBuffers = codec.getOutputBuffers();
+        // get the sample rate to configure AudioTrack
+        int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+        // create our AudioTrack instance
+        audioTrack = new AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                AudioTrack.getMinBufferSize (
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_STEREO,
+                        AudioFormat.ENCODING_PCM_16BIT
+                ),
+                AudioTrack.MODE_STREAM
+        );
+        // start playing, we will feed you later
+        audioTrack.play();
+        extractor.selectTrack(0);
+    }
 
-// We’ll place our following code into a Runnable so the Handler can call it for running
-// on the main UI thread
-        Runnable updater = new Runnable() {
-
+    private void loadAndDecodeTask(){
+        new Thread(new Runnable() {
+            @Override
             public void run() {
+                MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-                if (mediaPlayer == null) {
-
-// The MediaPlayer has not yet been created so see if we have
-// the minimum buffered data yet.
-// For our purposes, we take the minimum buffered requirement to be:
-// INTIAL_KB_BUFFER = 96*10/8;//assume 96kbps*10secs/8bits per byte
-                    if ( totalKbRead >= INTIAL_KB_BUFFER) {
-
-                        try {
-
-// We have enough buffered content so start the MediaPlayer
-                            startMediaPlayer(bufferedFile);
-
-                        } catch (Exception e) {
-
-                            Log.e(getClass().getName(), "Error copying buffered conent.", e);
-
-                        }
-
+                while(true ){
+                    int inputBufIndex = codec.dequeueInputBuffer(20000);
+                    if (inputBufIndex >= 0) {
+                        ByteBuffer dstBuf = codecInputBuffers[inputBufIndex];
+                        int sampleSize =
+                                    extractor.readSampleData(dstBuf, 0 /* offset */);
+                        long presentationTimeUs = extractor.getSampleTime();
+                        codec.queueInputBuffer(
+                                inputBufIndex,
+                                0 /* offset */,
+                                sampleSize,
+                                presentationTimeUs,
+                                0);
+                        extractor.advance();
                     }
 
-                } else if ( mediaPlayer.getDuration() -mediaPlayer.getCurrentPosition() <= 1000 ){
 
-// The MediaPlayer has been started and has reached the end of its buffered
-// content. We test for < 1second of data (i.e. 1000ms) because the media
-// player will often stop when there are still a few milliseconds of data left to play
-                    transferBufferToMediaPlayer();
+                    int res = codec.dequeueOutputBuffer(info, 20000);
+
+                    if (res >= 0) {
+                        //Log.d(LOG_TAG, "got frame, size " + info.size + "/" + info.presentationTimeUs);
+
+                        int outputBufIndex = res;
+                        ByteBuffer buf = codecOutputBuffers[outputBufIndex];
+
+                        final byte[] chunk = new byte[info.size];
+                        buf.get(chunk);
+                        buf.clear();
+                        if(chunk.length > 0) {
+                            Log.i("StreamingMediaPlayer", " inputBufIndex " + inputBufIndex + " outputBufIndex " + outputBufIndex+" resultBuffer.size "+resultBuffer.size());
+
+                            //audioTrack.write(chunk,0,chunk.length);
+                            resultBuffer.add(chunk);
+                            /*
+                            if(playPosition<resultBuffer.size()&&resultBuffer.size()>10){
+                                byte[] b=resultBuffer.get(playPosition);
+                                audioTrack.write(b,0,b.length);
+                                playPosition++;
+                            }
+                            */
+                        }
+                        codec.releaseOutputBuffer(outputBufIndex, false /* render */);
+                    } else if (res == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                        codecOutputBuffers = codec.getOutputBuffers();
+
+
+                    } else if (res == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+
+                    } else {
+                    }
 
                 }
-
             }
-
-        };
-        handle.post(updater);
+        }).start();
 
     }
-    private void startMediaPlayer(File bufferedFile) throws IOException {
 
-        try {
-
-            bufferedFile = File.createTempFile("playingMedia", ".dat");
-            copy(downloadingMediaFile, bufferedFile);} catch (IOException e) {
-
-            mediaPlayer = new MediaPlayer();
-            mediaPlayer.setDataSource(bufferedFile.getAbsolutePath());
-            mediaPlayer.prepare();
-
-            Log.e(getClass().getName(), "Error initializing the MediaPlaer.", e);
-            return;
-
-        }
-
-    }
-    public void copy(File src, File dst) throws IOException {
-        FileInputStream inStream = new FileInputStream(src);
-        FileOutputStream outStream = new FileOutputStream(dst);
-        FileChannel inChannel = inStream.getChannel();
-        FileChannel outChannel = outStream.getChannel();
-        inChannel.transferTo(0, inChannel.size(), outChannel);
-        inStream.close();
-        outStream.close();
-    }
-
-    private void transferBufferToMediaPlayer() {
-
-        try {
-
-// Determine if we need to restart the player after transferring data (e.g. perhaps the user
-// pressed pause) & also store the current audio position so we can reset it later.
-            boolean wasPlaying = mediaPlayer.isPlaying();
-            int curPosition = mediaPlayer.getCurrentPosition();
-            mediaPlayer.pause();
-
-// Copy the current buffer file as we can’t download content into the same file that
-// the MediaPlayer is reading from.
-            File bufferedFile = File.createTempFile("playingMedia", ".dat");
-            copy(downloadingMediaFile, bufferedFile);
-
-// Create a new MediaPlayer. We’ve tried reusing them but that seems to result in
-// more system crashes than simply creating new ones.
-            mediaPlayer = new MediaPlayer();
-            mediaPlayer.setDataSource(bufferedFile.getAbsolutePath());
-            mediaPlayer.prepare();
-            mediaPlayer.seekTo(curPosition);
-
-// Restart if at end of prior beuffered content or mediaPlayer was previously playing.
-// NOTE: We test for < 1second of data because the media player can stop when there is still
-// a few milliseconds of data left to play
-            boolean atEndOfFile = mediaPlayer.getDuration() - mediaPlayer.getCurrentPosition() <= 1000;
-            if (wasPlaying || atEndOfFile){
-
-                mediaPlayer.start();
-
+    private void playTask(){
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (true){
+                    if((audioTrack.getState()==AudioTrack.STATE_INITIALIZED)&&resultBuffer.size()>5){
+                        byte[] b=resultBuffer.get(playPosition);
+                        audioTrack.write(b,0,b.length);
+                        playPosition++;
+                    }
+                }
             }
-
-        }catch (Exception e) {
-
-            Log.e(getClass().getName(), "Error updating to newly loaded content.", e);
-
-        }
-
+        }).start();
     }
-
 
 
 }

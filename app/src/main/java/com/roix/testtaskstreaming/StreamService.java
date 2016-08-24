@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioManager;
+import android.media.MediaCodec;
+import android.media.MediaExtractor;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.net.rtp.AudioStream;
@@ -61,16 +63,16 @@ public class StreamService extends Service {
 
     private final long maxCacheDurationMSEK=15000;
     private int RENDERER_COUNT = 1; //since you want to render simple audio
-    private int minBufferMs = 1000;
-    private int minRebufferMs = 5000;
-    private int BUFFER_SEGMENT_SIZE = 64 * 1024;
-    private int BUFFER_SEGMENT_COUNT = 256;
+    private int minBufferMs = 0;
+    private int minRebufferMs = 0;
+    private int BUFFER_SEGMENT_SIZE =  1024;
+    private int BUFFER_SEGMENT_COUNT = 10;
 
     private long startingCachingTime=0;
     private long latency=0;
     private String lastUrl;
     private StreamCallback callback;
-    MyBinder binder;
+    private MyBinder binder;
 
     public StreamService() {
         binder = new MyBinder();
@@ -129,9 +131,10 @@ public class StreamService extends Service {
                 dataSource, allocator, BUFFER_SEGMENT_COUNT * BUFFER_SEGMENT_SIZE);
         audioTrackRenderer=new MediaCodecAudioTrackRenderer(extractorSampleSource, MediaCodecSelector.DEFAULT);
         exoPlayer.prepare(audioTrackRenderer);
-        exoPlayer.setPlayWhenReady(true);
+        //exoPlayer.setPlayWhenReady(true);
         exoPlayer.seekTo(exoPlayer.getCurrentPosition());
         playerControl=new PlayerControl(exoPlayer);
+        StreamingMediaPlayer streamingMediaPlayer=new StreamingMediaPlayer(url);
     }
 
 
@@ -207,7 +210,7 @@ public class StreamService extends Service {
                 else {
                     long startsTime=System.currentTimeMillis()-startingCachingTime;
                     startingCachingTime=0;
-                    extractorSampleSource.prepare(audioTrackRenderer.getPositionUs());
+                    //extractorSampleSource.prepare(audioTrackRenderer.getPositionUs());
 
                     //extractorSampleSource.seekToUs(audioTrackRenderer.getPositionUs());
                     long estimatedBufferDuration = ExoPlayer.UNKNOWN_TIME;
@@ -215,9 +218,9 @@ public class StreamService extends Service {
                     if (estimatedBufferPosition != ExoPlayer.UNKNOWN_TIME) {
                         estimatedBufferDuration = estimatedBufferPosition - exoPlayer.getCurrentPosition();
                     }
-                    exoPlayer.seekTo(exoPlayer.getCurrentPosition()-estimatedBufferDuration);
+                    //exoPlayer.seekTo(exoPlayer.getCurrentPosition()-estimatedBufferDuration);
                     if(startsTime>maxCacheDurationMSEK){
-                        exoPlayer.seekTo(maxCacheDurationMSEK);
+                        //exoPlayer.seekTo(maxCacheDurationMSEK);
                     }
                     if(cachingStarted&&exoPlayer.getPlayWhenReady()){
                         exoPlayer.seekTo(0);
@@ -246,7 +249,7 @@ public class StreamService extends Service {
                 if(exoPlayer==null)return;
 
             }
-
+            MediaExtractor mediaExtractor=new MediaExtractor();
 
         }
     }
