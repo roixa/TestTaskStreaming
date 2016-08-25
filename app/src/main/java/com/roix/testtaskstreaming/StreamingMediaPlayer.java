@@ -41,10 +41,19 @@ public class StreamingMediaPlayer {
     private String url;
     private int maxBufferDurationMSEC=15000;
     private StreamCallback callback;
+    private volatile boolean commandMoveToLiveEdge=false;
+    private volatile boolean commandStreamAfterRelease=false;
 
 
     private final Object lock=new Object();
     private long lastTimePosition;
+    public enum Event{
+        StartBuffering,
+        Playing,
+        IncorrectUrl,
+        EndOfStream
+    }
+
     public enum State {
         Stopped, // player is stopped and not prepared to play
         Playing,    // playback active
@@ -65,25 +74,27 @@ public class StreamingMediaPlayer {
 
     public void startStreaming(String url){
         this.url=url;
-        try {
-            initAndSetFormat();
-        } catch (IOException e) {
-            e.printStackTrace();
+        initAndSetFormat();
+
+        //loadAndDecodeTask();
+        //playTask();
+    }
+
+    public void restartStreaming(String url){
+        this.url=url;
+        if(state==State.Stopped){
+            startStreaming(url);
         }
-        state=State.Playing;
-        loadAndDecodeTask();
-        playTask();
+        else {
+            state=State.Stopped;
+            commandStreamAfterRelease=true;
+
+        }
     }
 
     public void moveToLiveEdge(){
         if(state==State.Stopped)startStreaming(url);
-        synchronized (lock){
-            if(resultBuffer.size()==0)return;
-            Pair<byte[],Integer> pair=resultBuffer.get(resultBuffer.size()-1);
-            resultBuffer.clear();
-            resultBuffer.add(pair);
-        }
-
+        commandMoveToLiveEdge=true;
     }
 
     public void start(){
@@ -99,6 +110,7 @@ public class StreamingMediaPlayer {
 
     public void stop(){
         state=State.Stopped;
+        //releaseStreamingResources();
 
     }
 
@@ -116,36 +128,56 @@ public class StreamingMediaPlayer {
 
 
 
-    private void initAndSetFormat() throws IOException {
-        resultBuffer=new ArrayList<>();
-        extractor = new MediaExtractor();
-        extractor.setDataSource(url);
-        MediaFormat format = extractor.getTrackFormat(0);
-        String mime = format.getString(MediaFormat.KEY_MIME);
-        // the actual decoder
-        codec = MediaCodec.createDecoderByType(mime);
-        codec.configure(format, null /* surface */, null /* crypto */, 0 /* flags */);
-        codec.start();
-        codecInputBuffers = codec.getInputBuffers();
-        codecOutputBuffers = codec.getOutputBuffers();
-        // get the sample rate to configure AudioTrack
-        int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-        // create our AudioTrack instance
-        audioTrack = new AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                AudioTrack.getMinBufferSize (
-                        sampleRate,
-                        AudioFormat.CHANNEL_OUT_STEREO,
-                        AudioFormat.ENCODING_PCM_16BIT
-                ),
-                AudioTrack.MODE_STREAM
-        );
-        // start playing, we will feed you later
-        audioTrack.play();
-        extractor.selectTrack(0);
+    private void initAndSetFormat()  {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    sendEvent(Event.StartBuffering);
+                    resultBuffer=new ArrayList<>();
+                    extractor = new MediaExtractor();
+
+                    extractor.setDataSource(url);
+                    MediaFormat format = extractor.getTrackFormat(0);
+                    String mime = format.getString(MediaFormat.KEY_MIME);
+                    // the actual decoder
+                    codec = MediaCodec.createDecoderByType(mime);
+                    codec.configure(format, null /* surface */, null /* crypto */, 0 /* flags */);
+                    codec.start();
+                    codecInputBuffers = codec.getInputBuffers();
+                    codecOutputBuffers = codec.getOutputBuffers();
+                    // get the sample rate to configure AudioTrack
+                    int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+                    // create our AudioTrack instance
+                    audioTrack = new AudioTrack(
+                            AudioManager.STREAM_MUSIC,
+                            sampleRate,
+                            AudioFormat.CHANNEL_OUT_STEREO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            AudioTrack.getMinBufferSize (
+                                    sampleRate,
+                                    AudioFormat.CHANNEL_OUT_STEREO,
+                                    AudioFormat.ENCODING_PCM_16BIT
+                            ),
+                            AudioTrack.MODE_STREAM
+                    );
+                    // start playing, we will feed you later
+                    audioTrack.play();
+                    extractor.selectTrack(0);
+                    state=State.Playing;
+                    sendEvent(Event.Playing);
+
+                    loadAndDecodeTask();
+                    playTask();
+                } catch (IOException e) {
+                    releaseStreamingResources();
+                    sendEvent(Event.IncorrectUrl);
+                    e.printStackTrace();
+                }
+
+            }
+        }).start();
+
     }
 
     private void loadAndDecodeTask(){
@@ -160,6 +192,11 @@ public class StreamingMediaPlayer {
                         ByteBuffer dstBuf = codecInputBuffers[inputBufIndex];
                         int sampleSize =
                                     extractor.readSampleData(dstBuf, 0 /* offset */);
+                        if(sampleSize<0){
+                            sendEvent(Event.EndOfStream);
+                            state=State.Stopped;
+                            break;
+                        }
                         long presentationTimeUs = extractor.getSampleTime();
 
                         codec.queueInputBuffer(
@@ -233,7 +270,13 @@ public class StreamingMediaPlayer {
 
                             byte[] b = resultBuffer.get(0).first;
                             audioTrack.write(b, 0, b.length);
-                            resultBuffer.remove(0);
+                            if(commandMoveToLiveEdge){
+                                Pair<byte[],Integer> pair=resultBuffer.get(resultBuffer.size()-1);
+                                resultBuffer.clear();
+                                resultBuffer.add(pair);
+                                commandMoveToLiveEdge=false;
+                            }else resultBuffer.remove(0);
+
                             lastTimePosition=System.currentTimeMillis();
                             if(callback!=null)callback.onLoad(bufferDuration());
                         }
@@ -250,6 +293,10 @@ public class StreamingMediaPlayer {
             ret+=pair.second;
         }
         return ret;
+    }
+
+    private synchronized void sendEvent(Event event){
+        if(callback!=null)callback.onSentEvent(event);
     }
 
     private void releaseStreamingResources(){
@@ -276,6 +323,10 @@ public class StreamingMediaPlayer {
         synchronized (lock){
             resultBuffer.clear();
             resultBuffer=null;
+        }
+        if(commandStreamAfterRelease){
+            commandStreamAfterRelease=false;
+            startStreaming(url);
         }
 
 

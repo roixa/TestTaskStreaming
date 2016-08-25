@@ -67,6 +67,11 @@ public class StreamService extends Service {
 
     }
 
+    public void playWithThisUrl(String url){
+        lastUrl=url;
+        streamingMediaPlayer.restartStreaming(url);
+    }
+
     public void setCallback(StreamCallback callback){
         if(streamingMediaPlayer!=null)streamingMediaPlayer.setCallback(callback);
     }

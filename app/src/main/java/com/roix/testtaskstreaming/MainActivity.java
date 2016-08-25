@@ -1,6 +1,8 @@
 package com.roix.testtaskstreaming;
 
+import android.app.AlertDialog;
 import android.content.ComponentName;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.media.AudioManager;
@@ -14,11 +16,15 @@ import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
+import android.text.InputType;
 import android.util.Log;
 import android.view.View;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
+import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
@@ -56,17 +62,23 @@ import com.google.android.exoplayer.util.Util;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.ArrayList;
 
 
-public class MainActivity extends AppCompatActivity implements StreamCallback,View.OnClickListener{
+public class MainActivity extends AppCompatActivity implements StreamCallback,View.OnClickListener,AdapterView.OnItemClickListener{
 
     private ProgressBar progressBar;
     private ServiceConnection sConn;
     private Intent serviceIntent;
     private StreamService streamService;
+    private TextView urlTextView;
+    private ListView listView;
     private String url1="http://192.168.1.59:8080/aaaa.mp3";
     private String url2="http://online.radiorecord.ru:8101/rr_128";
-    private String url3="http://pub5.radiotunes.com:80/radiotunes_hit70s";
+
+    private String currUrl=url2;
+    private ArrayList<String> urls;
+    ArrayAdapter<String> adapter;
 
 
     @Override
@@ -75,14 +87,27 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
         setContentView(R.layout.activity_main);
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-
+        urlTextView=(TextView)findViewById(R.id.textView);
+        listView=(ListView)findViewById(R.id.listView);
+        urlTextView.setText(currUrl);
         FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.fab);
         fab.setOnClickListener(this);
 
         progressBar=(ProgressBar)findViewById(R.id.progressBar);
         progressBar.setMax(15000);
         progressBar.setProgress(0);
+
+        urls=new ArrayList<>();
+        urls.add(url2);
+        urls.add(url1);
+        adapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_list_item_1, urls);
+        listView.setAdapter(adapter);
+        listView.setOnItemClickListener(this);
+
+
         initService();
+        startService(serviceIntent);
 
     }
 
@@ -91,7 +116,6 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
     protected void onStart() {
         super.onStart();
         bindService(serviceIntent, sConn, 0);
-        startService(serviceIntent);
     }
 
     @Override
@@ -113,7 +137,7 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
             public void onServiceConnected(ComponentName name, IBinder binder) {
                 Log.i("play task","onServiceConnected");
                 streamService = ((StreamService.MyBinder) binder).getService();
-                streamService.initService(url2);
+                streamService.initService(currUrl);
                 streamService.setCallback(streamCallback);
             }
             public void onServiceDisconnected(ComponentName name) {
@@ -151,6 +175,28 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
 
     @Override
     public void onClick(View view) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Add stream address");
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD );
+        builder.setView(input);
+        builder.setPositiveButton("OK", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                String newUrl = input.getText().toString();
+                urls.add(newUrl);
+                adapter.notifyDataSetChanged();
+
+
+            }
+        });
+        builder.setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                dialog.cancel();
+            }
+        });
+        builder.show();
 
     }
 
@@ -160,14 +206,27 @@ public class MainActivity extends AppCompatActivity implements StreamCallback,Vi
     }
 
     @Override
-    public void onError(String err) {
+    public void onSentEvent(final StreamingMediaPlayer.Event event) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if(event== StreamingMediaPlayer.Event.StartBuffering) urlTextView.setText("please wait");
+                else if(event== StreamingMediaPlayer.Event.Playing)urlTextView.setText(currUrl);
+                else if(event== StreamingMediaPlayer.Event.EndOfStream) urlTextView.setText("end of stream");
+                else if(event== StreamingMediaPlayer.Event.IncorrectUrl) urlTextView.setText("dont read url");
 
+
+            }
+        });
     }
+
+
+
 
     @Override
-    public void onCompleteStream(String msg) {
-
+    public void onItemClick(AdapterView<?> adapterView, View view, int i, long l) {
+        String url=urls.get(i);
+        currUrl=url;
+        streamService.playWithThisUrl(url);
     }
-
-
 }

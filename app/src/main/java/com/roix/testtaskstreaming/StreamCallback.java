@@ -5,6 +5,5 @@ package com.roix.testtaskstreaming;
  */
 public interface StreamCallback {
     void onLoad(long timeMSEC);
-    void onError(String err);
-    void onCompleteStream(String msg);
+    void onSentEvent(StreamingMediaPlayer.Event event);
 }
